@@ -1,7 +1,17 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use(::load)
+}
+
+fun localString(name: String, fallback: String): String =
+    localProperties.getProperty(name, fallback).replace("\\", "\\\\").replace("\"", "\\\"")
 
 android {
     namespace = "com.example.lr_1"
@@ -17,6 +27,21 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField(
+            "String",
+            "CLOUD_BASE_URL",
+            "\"${localString("CLOUD_BASE_URL", "https://jsonplaceholder.typicode.com/")}\"",
+        )
+        buildConfigField(
+            "String",
+            "CLOUD_UPLOAD_PATH",
+            "\"${localString("CLOUD_UPLOAD_PATH", "posts")}\"",
+        )
+        buildConfigField(
+            "String",
+            "CLOUD_COMMAND_PATH",
+            "\"${localString("CLOUD_COMMAND_PATH", "todos/19")}\"",
+        )
     }
 
     buildTypes {
@@ -32,6 +57,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -46,6 +72,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.retrofit.core)
+    implementation(libs.retrofit.converter.gson)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

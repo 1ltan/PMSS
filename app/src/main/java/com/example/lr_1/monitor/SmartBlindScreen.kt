@@ -1,6 +1,9 @@
 package com.example.lr_1.monitor
 
+import android.Manifest
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +24,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,6 +48,9 @@ import com.example.lr_1.helpers.ble.BleConnectionState
 import com.example.lr_1.helpers.ble.BleDevice
 import com.example.lr_1.ui.theme.LR_1Theme
 import java.util.Locale
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -54,12 +61,19 @@ private fun number(value: Float?) =
 fun SmartBlindScreen(viewModel: SmartBlindViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.onAction(SmartBlindAction.CameraPermissionResult(granted))
+    }
 
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
                 is SmartBlindEvent.ShowMessage ->
                     Toast.makeText(context, event.text, Toast.LENGTH_SHORT).show()
+                SmartBlindEvent.RequestCameraPermission ->
+                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
             }
         }
     }
@@ -80,7 +94,6 @@ fun SmartBlindContent(state: SmartBlindState, onAction: (SmartBlindAction) -> Un
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("Smart Blind Controller", style = MaterialTheme.typography.headlineLarge)
-            Text("ЛР №1–2 · сенсор кута та Mock BLE-керування")
 
             Panel("Акселерометр · X / Y / Z") {
                 Text(sensorStatusText(state.sensorStatus), color = MaterialTheme.colorScheme.primary)
@@ -115,13 +128,106 @@ fun SmartBlindContent(state: SmartBlindState, onAction: (SmartBlindAction) -> Un
             }
 
             Panel("Віртуальні жалюзі") {
+                val actualOpening = state.actuatorOpeningPercent ?: state.position?.openingPercent
                 Text(
-                    state.position?.label ?: "Очікування даних",
+                    when (actualOpening) {
+                        15 -> "Прикрито"
+                        50 -> "Напіввідкрито"
+                        100 -> "Відкрито"
+                        null -> "Очікування даних"
+                        else -> "Відкрито на $actualOpening %"
+                    },
                     style = MaterialTheme.typography.headlineSmall,
                 )
-                Text("Відкриття: ${state.position?.openingPercent?.let { "$it %" } ?: "—"}")
-                BlindsCanvas(state.position?.openingPercent, state.angle)
+                Text("Фактичне відкриття: ${actualOpening?.let { "$it %" } ?: "—"}")
+                BlindsCanvas(actualOpening, state.angle)
                 Text("Пороги: 30° / 60° · Гістерезис: ±3°", style = MaterialTheme.typography.bodySmall)
+            }
+
+            Panel("Хмарна синхронізація · REST/JSON") {
+                Text(
+                    "Статус: ${cloudStatusText(state.cloudSyncStatus)}",
+                    color = cloudStatusColor(state.cloudSyncStatus),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text("Відправлення: кожні 5 с; команди: polling кожні 10 с")
+                Text("Остання синхронізація: ${formatTime(state.lastCloudSyncAt)}")
+                Text("Команда: ${state.lastRemoteCommand ?: "ще не отримана"}")
+                Text(
+                    "Стан команд: ${remoteStatusText(state.remoteCommandStatus)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    onClick = { onAction(SmartBlindAction.SyncNow) },
+                    enabled = state.cloudSyncStatus != CloudSyncStatus.SYNCING,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Синхронізувати зараз")
+                }
+                OutlinedButton(
+                    onClick = { onAction(SmartBlindAction.PollRemoteCommand) },
+                    enabled = state.remoteCommandStatus != RemoteCommandStatus.POLLING,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Отримати хмарну команду")
+                }
+                if (state.cloudSyncStatus == CloudSyncStatus.PENDING) {
+                    Text(
+                        "Останній пакет має статус Pending і буде повторно надісланий.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            Panel("Manual Control · актуатори") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Автоматичне керування")
+                    Switch(
+                        checked = state.automaticControlEnabled,
+                        onCheckedChange = { onAction(SmartBlindAction.SetAutomaticControl(it)) },
+                    )
+                }
+                Text(
+                    "Виконавчий стан: ${state.actuatorOpeningPercent?.let { "$it %" } ?: "очікування"} · " +
+                        controlSourceText(state.controlSource),
+                )
+                Text(
+                    if (state.isCritical) "Критичний кут: автоматичний вібровідгук активний"
+                    else "Критичний поріг: 60°",
+                    color = if (state.isCritical) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = { onAction(SmartBlindAction.SetManualOpening(15)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Прикрити до 15 %") }
+                OutlinedButton(
+                    onClick = { onAction(SmartBlindAction.SetManualOpening(50)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Відкрити до 50 %") }
+                OutlinedButton(
+                    onClick = { onAction(SmartBlindAction.SetManualOpening(100)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Відкрити до 100 %") }
+                Button(
+                    onClick = { onAction(SmartBlindAction.TriggerVibration) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Тест вібровідгуку") }
+                OutlinedButton(
+                    onClick = { onAction(SmartBlindAction.SetFlashlight(!state.flashlightEnabled)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (state.flashlightEnabled) "Вимкнути ліхтарик" else "Увімкнути ліхтарик")
+                }
+                Text(
+                    if (state.flashlightHardwareAvailable) "Camera flash доступний"
+                    else "Camera flash відсутній: стан імітується в UI",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             Panel("Mock BLE · пошук пристроїв") {
@@ -289,6 +395,39 @@ private fun connectionColor(status: BleConnectionState) = when (status) {
     BleConnectionState.CONNECTING -> Color(0xFF8A6200)
     BleConnectionState.CONNECTED -> Color(0xFF1B7F3A)
 }
+
+private fun cloudStatusText(status: CloudSyncStatus) = when (status) {
+    CloudSyncStatus.IDLE -> "очікування даних"
+    CloudSyncStatus.SYNCING -> "відправлення"
+    CloudSyncStatus.SYNCED -> "успішно"
+    CloudSyncStatus.PENDING -> "Pending"
+}
+
+private fun cloudStatusColor(status: CloudSyncStatus) = when (status) {
+    CloudSyncStatus.SYNCED -> Color(0xFF1B7F3A)
+    CloudSyncStatus.PENDING -> Color(0xFFB3261E)
+    CloudSyncStatus.SYNCING -> Color(0xFF8A6200)
+    CloudSyncStatus.IDLE -> Color.Unspecified
+}
+
+private fun remoteStatusText(status: RemoteCommandStatus) = when (status) {
+    RemoteCommandStatus.IDLE -> "очікування"
+    RemoteCommandStatus.POLLING -> "запит"
+    RemoteCommandStatus.RECEIVED -> "отримано"
+    RemoteCommandStatus.ERROR -> "помилка"
+}
+
+private fun controlSourceText(source: ControlSource) = when (source) {
+    ControlSource.AUTOMATIC -> "DecisionEngine"
+    ControlSource.MANUAL -> "ручна команда"
+    ControlSource.CLOUD -> "хмарна команда"
+}
+
+private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+private fun formatTime(timestamp: Long?): String = timestamp?.let {
+    Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).format(timeFormatter)
+} ?: "—"
 
 @Preview(showBackground = true)
 @Composable

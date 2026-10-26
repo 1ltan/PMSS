@@ -6,6 +6,9 @@ import com.example.lr_1.helpers.ble.BleConnectionState
 import com.example.lr_1.helpers.ble.BleDevice
 
 enum class SensorStatus { WAITING, ACTIVE, PAUSED, UNAVAILABLE, ERROR }
+enum class CloudSyncStatus { IDLE, SYNCING, SYNCED, PENDING }
+enum class RemoteCommandStatus { IDLE, POLLING, RECEIVED, ERROR }
+enum class ControlSource { AUTOMATIC, MANUAL, CLOUD }
 
 data class SmartBlindState(
     val raw: Acceleration? = null,
@@ -19,6 +22,16 @@ data class SmartBlindState(
     val selectedDevice: BleDevice? = null,
     val connectionState: BleConnectionState = BleConnectionState.DISCONNECTED,
     val terminalLines: List<String> = emptyList(),
+    val cloudSyncStatus: CloudSyncStatus = CloudSyncStatus.IDLE,
+    val lastCloudSyncAt: Long? = null,
+    val remoteCommandStatus: RemoteCommandStatus = RemoteCommandStatus.IDLE,
+    val lastRemoteCommand: String? = null,
+    val automaticControlEnabled: Boolean = true,
+    val actuatorOpeningPercent: Int? = null,
+    val controlSource: ControlSource = ControlSource.AUTOMATIC,
+    val isCritical: Boolean = false,
+    val flashlightEnabled: Boolean = false,
+    val flashlightHardwareAvailable: Boolean = false,
 )
 
 sealed interface SmartBlindAction {
@@ -31,8 +44,16 @@ sealed interface SmartBlindAction {
     data object SendCurrentPosition : SmartBlindAction
     data object ReadRemoteStatus : SmartBlindAction
     data object ClearTerminal : SmartBlindAction
+    data object SyncNow : SmartBlindAction
+    data object PollRemoteCommand : SmartBlindAction
+    data class SetAutomaticControl(val enabled: Boolean) : SmartBlindAction
+    data class SetManualOpening(val percent: Int) : SmartBlindAction
+    data object TriggerVibration : SmartBlindAction
+    data class SetFlashlight(val enabled: Boolean) : SmartBlindAction
+    data class CameraPermissionResult(val granted: Boolean) : SmartBlindAction
 }
 
 sealed interface SmartBlindEvent {
     data class ShowMessage(val text: String) : SmartBlindEvent
+    data object RequestCameraPermission : SmartBlindEvent
 }
