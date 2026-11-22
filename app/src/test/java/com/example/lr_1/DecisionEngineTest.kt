@@ -21,4 +21,21 @@ class DecisionEngineTest {
         assertFalse(engine.evaluate(57f, BlindPosition.HALF_OPEN).isCritical)
         assertTrue(engine.evaluate(61f, BlindPosition.OPEN).triggerHapticFeedback)
     }
+
+    @Test fun configurableThresholdOverridesNormalBlindPosition() {
+        val engine = DecisionEngine(45f)
+        val decision = engine.evaluate(45f, BlindPosition.HALF_OPEN)
+
+        assertTrue(decision.isCritical)
+        assertTrue(decision.triggerHapticFeedback)
+        assertTrue(decision.openingPercent == 100)
+    }
+
+    @Test fun updatingThresholdResetsCriticalLatch() {
+        val engine = DecisionEngine(60f)
+        engine.evaluate(65f, BlindPosition.OPEN)
+        engine.updateThreshold(70f)
+
+        assertFalse(engine.evaluate(65f, BlindPosition.OPEN).isCritical)
+    }
 }

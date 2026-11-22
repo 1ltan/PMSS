@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lr_1.SmartBlindApplication
+import com.example.lr_1.analytics.SensorSample
 import com.example.lr_1.domain.Acceleration
 import com.example.lr_1.domain.BlindController
 import com.example.lr_1.domain.DecisionEngine
@@ -19,7 +20,6 @@ import com.example.lr_1.helpers.ble.MockBleConnector
 import com.example.lr_1.helpers.ble.MockBleScanner
 import com.example.lr_1.protocol.BlindCommand
 import com.example.lr_1.repository.RemoteCommand
-import com.example.lr_1.repository.SensorReading
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
@@ -27,8 +27,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -56,18 +60,25 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
     private val _events = Channel<SmartBlindEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    private val _sensorSamples = MutableSharedFlow<SensorSample>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val sensorSamples: SharedFlow<SensorSample> = _sensorSamples.asSharedFlow()
+
     private var sensorJob: Job? = null
     private var scanJob: Job? = null
     private var cloudSyncJob: Job? = null
     private var commandPollingJob: Job? = null
     private var uploadJob: Job? = null
     private var commandRequestJob: Job? = null
-    private var pendingReading: SensorReading? = null
     private var pendingFlashlightSource: ControlSource? = null
+    private var lastAutomaticBleOpening: Int? = null
 
     init {
         observeBleState()
         observeNotifications()
+        observePendingRecords()
     }
 
     /** Єдиний вхід у ViewModel: UI та Activity надсилають лише Action. */
@@ -85,6 +96,7 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
             SmartBlindAction.SyncNow -> uploadLatestReading()
             SmartBlindAction.PollRemoteCommand -> pollRemoteCommand()
             is SmartBlindAction.SetAutomaticControl -> setAutomaticControl(action.enabled)
+            is SmartBlindAction.SetCriticalThreshold -> setCriticalThreshold(action.degrees)
             is SmartBlindAction.SetManualOpening -> setManualOpening(action.percent)
             SmartBlindAction.TriggerVibration -> triggerVibration()
             is SmartBlindAction.SetFlashlight -> setFlashlight(action.enabled, ControlSource.MANUAL)
@@ -174,10 +186,30 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
                 },
             )
         }
+        if (angle != null) {
+            _sensorSamples.tryEmit(
+                SensorSample(
+                    timestamp = System.currentTimeMillis(),
+                    raw = raw,
+                    sensorValue = angle,
+                    actionTriggered = decision?.triggerHapticFeedback == true,
+                )
+            )
+        }
         if (_state.value.automaticControlEnabled && decision?.triggerHapticFeedback == true) {
             val result = actuator.triggerVibration()
             addLog("ACTUATOR AUTO_VIBRATION: ${result.message}")
             emitMessage(result.message)
+        }
+        val automaticOpening = decision?.openingPercent
+        if (
+            _state.value.automaticControlEnabled &&
+            automaticOpening != null &&
+            _state.value.connectionState == BleConnectionState.CONNECTED &&
+            automaticOpening != lastAutomaticBleOpening
+        ) {
+            lastAutomaticBleOpening = automaticOpening
+            send(BlindCommand.SetOpening(automaticOpening))
         }
     }
 
@@ -201,45 +233,29 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    private fun currentReading(): SensorReading? {
-        val state = _state.value
-        val raw = state.raw ?: return null
-        val angle = state.angle ?: return null
-        return SensorReading(
-            deviceId = DEVICE_ID,
-            timestamp = System.currentTimeMillis(),
-            value = angle,
-            type = SENSOR_TYPE,
-            x = raw.x,
-            y = raw.y,
-            z = raw.z,
-        )
-    }
-
     private fun uploadLatestReading() {
         if (uploadJob != null) return
-        val reading = pendingReading ?: currentReading()
-        if (reading == null) {
-            emitMessage("Немає валідних сенсорних даних для синхронізації")
-            return
-        }
         uploadJob = viewModelScope.launch {
             val wasPending = _state.value.cloudSyncStatus == CloudSyncStatus.PENDING
             try {
                 _state.update { it.copy(cloudSyncStatus = CloudSyncStatus.SYNCING) }
-                repository.save(reading)
-                    .onSuccess {
-                        pendingReading = null
+                repository.syncPending()
+                    .onSuccess { summary ->
                         _state.update {
                             it.copy(
                                 cloudSyncStatus = CloudSyncStatus.SYNCED,
-                                lastCloudSyncAt = System.currentTimeMillis(),
+                                lastCloudSyncAt = if (summary.synced > 0) {
+                                    System.currentTimeMillis()
+                                } else {
+                                    it.lastCloudSyncAt
+                                },
                             )
                         }
-                        addLog("CLOUD POST angle=${reading.value}")
+                        if (summary.synced > 0) {
+                            addLog("CLOUD SYNC ${summary.synced}/${summary.attempted} records")
+                        }
                     }
                     .onFailure { error ->
-                        pendingReading = reading
                         _state.update { it.copy(cloudSyncStatus = CloudSyncStatus.PENDING) }
                         addLog("CLOUD PENDING: ${error.message}")
                         if (!wasPending) emitMessage("Хмарна синхронізація очікує мережу")
@@ -292,6 +308,7 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private fun setAutomaticControl(enabled: Boolean) {
+        if (enabled) decisionEngine.reset()
         _state.update { current ->
             current.copy(
                 automaticControlEnabled = enabled,
@@ -303,6 +320,17 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
                 controlSource = if (enabled) ControlSource.AUTOMATIC else current.controlSource,
             )
         }
+    }
+
+    private fun setCriticalThreshold(degrees: Float) {
+        decisionEngine.updateThreshold(degrees)
+        _state.update {
+            it.copy(
+                criticalThreshold = degrees,
+                isCritical = false,
+            )
+        }
+        addLog("RULE threshold=${degrees.toInt()} degrees")
     }
 
     private fun setManualOpening(percent: Int) {
@@ -328,6 +356,17 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun setFlashlight(enabled: Boolean, source: ControlSource) {
         if (enabled && actuator.hasFlashlight() && !actuator.hasCameraPermission()) {
+            if (source != ControlSource.MANUAL) {
+                _state.update {
+                    it.copy(
+                        flashlightEnabled = false,
+                        flashlightHardwareAvailable = true,
+                        controlSource = source,
+                    )
+                }
+                addLog("ACTUATOR FLASHLIGHT=true skipped: CAMERA permission requires a user action")
+                return
+            }
             pendingFlashlightSource = source
             viewModelScope.launch { _events.send(SmartBlindEvent.RequestCameraPermission) }
             return
@@ -431,7 +470,34 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
         connector.connectionState.collect { connection ->
             val previous = _state.value.connectionState
             _state.update { it.copy(connectionState = connection) }
+            if (connection == BleConnectionState.CONNECTED && previous != connection) {
+                lastAutomaticBleOpening = null
+                if (_state.value.automaticControlEnabled) {
+                    _state.value.actuatorOpeningPercent?.let { opening ->
+                        lastAutomaticBleOpening = opening
+                        send(BlindCommand.SetOpening(opening))
+                    }
+                }
+            }
+            if (connection == BleConnectionState.DISCONNECTED) lastAutomaticBleOpening = null
             if (connection != previous) addLog("STATE $connection")
+        }
+    }
+
+    private fun observePendingRecords() = viewModelScope.launch {
+        repository.observePendingCount().collect { count ->
+            _state.update { current ->
+                current.copy(
+                    pendingRecords = count,
+                    cloudSyncStatus = if (
+                        count > 0 && current.cloudSyncStatus != CloudSyncStatus.SYNCING
+                    ) {
+                        CloudSyncStatus.PENDING
+                    } else {
+                        current.cloudSyncStatus
+                    },
+                )
+            }
         }
     }
 
@@ -461,8 +527,6 @@ class SmartBlindViewModel(application: Application) : AndroidViewModel(applicati
         private const val LOG_TAG = "SmartBlinds"
         private const val BLE_LOG_TAG = "SmartBlindsBLE"
         private const val MAX_LOG_LINES = 40
-        private const val DEVICE_ID = "SMART-BLIND-19"
-        private const val SENSOR_TYPE = "incidence_angle"
         private const val CLOUD_SYNC_INTERVAL_MS = 5_000L
         private const val COMMAND_POLL_INTERVAL_MS = 10_000L
         private val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")

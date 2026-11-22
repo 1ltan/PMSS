@@ -1,16 +1,20 @@
 package com.example.lr_1
 
 import android.app.Application
+import com.example.lr_1.data.local.SmartBlindDatabase
 import com.example.lr_1.helpers.NetworkMonitor
 import com.example.lr_1.helpers.SmartActuator
 import com.example.lr_1.repository.CloudServiceFactory
 import com.example.lr_1.repository.SensorRepository
 
 class SmartBlindApplication : Application() {
+    private val database: SmartBlindDatabase by lazy { SmartBlindDatabase.getInstance(this) }
+
     val sensorRepository: SensorRepository by lazy {
         SensorRepository(
             api = CloudServiceFactory.create(BuildConfig.CLOUD_BASE_URL),
             networkMonitor = NetworkMonitor(this),
+            dao = database.sensorRecordDao(),
             uploadEndpoint = BuildConfig.CLOUD_UPLOAD_PATH,
             commandEndpoint = BuildConfig.CLOUD_COMMAND_PATH,
         )

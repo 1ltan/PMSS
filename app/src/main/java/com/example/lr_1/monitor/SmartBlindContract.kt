@@ -23,6 +23,7 @@ data class SmartBlindState(
     val connectionState: BleConnectionState = BleConnectionState.DISCONNECTED,
     val terminalLines: List<String> = emptyList(),
     val cloudSyncStatus: CloudSyncStatus = CloudSyncStatus.IDLE,
+    val pendingRecords: Int = 0,
     val lastCloudSyncAt: Long? = null,
     val remoteCommandStatus: RemoteCommandStatus = RemoteCommandStatus.IDLE,
     val lastRemoteCommand: String? = null,
@@ -32,6 +33,7 @@ data class SmartBlindState(
     val isCritical: Boolean = false,
     val flashlightEnabled: Boolean = false,
     val flashlightHardwareAvailable: Boolean = false,
+    val criticalThreshold: Float = 60f,
 )
 
 sealed interface SmartBlindAction {
@@ -47,6 +49,7 @@ sealed interface SmartBlindAction {
     data object SyncNow : SmartBlindAction
     data object PollRemoteCommand : SmartBlindAction
     data class SetAutomaticControl(val enabled: Boolean) : SmartBlindAction
+    data class SetCriticalThreshold(val degrees: Float) : SmartBlindAction
     data class SetManualOpening(val percent: Int) : SmartBlindAction
     data object TriggerVibration : SmartBlindAction
     data class SetFlashlight(val enabled: Boolean) : SmartBlindAction
